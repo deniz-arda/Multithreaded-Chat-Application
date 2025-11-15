@@ -1,56 +1,78 @@
-
 #include <stdio.h>
 #include "udp.h"
+#include "thread_wrappers.h"
 
 #define CLIENT_PORT 10000
+
+typedef struct {
+    int sd;
+    int exit;
+    struct sockaddr_in server_addr;
+} ClientState;
+
+// Reads user input and sends to server
+void* sender_thread(void *arg) {
+    ClientState *state = (ClientState *)arg;
+    char input[BUFFER_SIZE];
+    
+    while (1) {
+        fgets(input, BUFFER_SIZE, stdin);
+        input[strcspn(input, "\n")] = 0;
+
+        udp_socket_write(state->sd, &state->server_addr, input, BUFFER_SIZE);
+        
+        // handle disconnecting
+        if (strncmp(input, "disconn$", 8) == 0) {
+            state->exit = 1;
+            break;
+        }
+    }
+    return NULL;
+}
+
+// Listens for messages from the server and displays them
+void* listener_thread(void *arg) {
+    ClientState *state = (ClientState *)arg; 
+    char response[BUFFER_SIZE];
+    struct sockaddr_in responder_addr;
+    
+    while (!state->exit) {
+        int rc = udp_socket_read(state->sd, &responder_addr, response, BUFFER_SIZE);
+
+        if (rc > 0) {
+            printf("%s\n", response);
+        }
+    }
+    return NULL;
+}
 
 // client code
 int main(int argc, char *argv[])
 {
-    // This function opens a UDP socket,
-    // binding it to all IP interfaces of this machine,
-    // and port number CLIENT_PORT.
-    // (See details of the function in udp.h)
+    // Open UDP socket on CLIENT_PORT
     int sd = udp_socket_open(CLIENT_PORT);
 
-    // Variable to store the server's IP address and port
-    // (i.e. the server we are trying to contact).
-    // Generally, it is possible for the responder to be
-    // different from the server requested.
-    // Although, in our case the responder will
-    // always be the same as the server.
-    struct sockaddr_in server_addr, responder_addr;
-
-    // Initializing the server's address.
-    // We are currently running the server on localhost (127.0.0.1).
-    // You can change this to a different IP address
-    // when running the server on a different machine.
-    // (See details of the function in udp.h)
+    // Set up server address
+    struct sockaddr_in server_addr;
     int rc = set_socket_addr(&server_addr, "127.0.0.1", SERVER_PORT);
 
-    // Storage for request and response messages
-    char client_request[BUFFER_SIZE], server_response[BUFFER_SIZE];
+    // Initialize client state
+    ClientState state;
+    state.sd = sd;
+    state.exit = 0;
+    state.server_addr = server_addr;
 
-    // Demo code (remove later)
-    strcpy(client_request, "Dummy Request");
+    // Create sender and listener threads
+    pthread_t sender, listener;
+    pthread_create_w(&sender, NULL, sender_thread, &state);
+    pthread_create_w(&listener, NULL, listener_thread, &state);
 
-    // This function writes to the server (sends request)
-    // through the socket at sd.
-    // (See details of the function in udp.h)
-    rc = udp_socket_write(sd, &server_addr, client_request, BUFFER_SIZE);
+    // Wait for threads to finish
+    pthread_join_w(sender, NULL);
+    pthread_join_w(listener, NULL);
 
-    if (rc > 0)
-    {
-        // This function reads the response from the server
-        // through the socket at sd.
-        // In our case, responder_addr will simply be
-        // the same as server_addr.
-        // (See details of the function in udp.h)
-        int rc = udp_socket_read(sd, &responder_addr, server_response, BUFFER_SIZE);
-
-        // Demo code (remove later)
-        printf("server_response: %s", server_response);
-    }
+    // Close socket
+    close(sd);
 
     return 0;
 }
