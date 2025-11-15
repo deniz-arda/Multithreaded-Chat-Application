@@ -3,6 +3,41 @@
 #include "udp.h"
 #include "thread_wrappers.h"
 
+// Linked list structure to store information on clients
+typedef struct ClientNode {
+    struct sockaddr_in addr;
+    char name[BUFFER_SIZE];
+    struct ClientNode *next; 
+} ClientNode;
+
+ClientNode *client_list = NULL;
+pthread_mutex_t client_list_mutex; 
+
+void add_client(struct sockaddr_in addr, char *name) {
+    ClientNode *new_client = (ClientNode *)malloc(sizeof(ClientNode));
+    new_client->addr = addr;
+    strcpy(new_client->name, name);
+    new_client->next = NULL;
+
+    pthread_mutex_lock_w(&client_list_mutex);
+
+    if (client_list == NULL) {
+        client_list = new_client;
+    }
+    else {
+        ClientNode *current = client_list;
+        while (current->next != NULL) {
+            current = current->next;
+        }
+        current->next = new_client;
+    }
+    pthread_mutex_unlock_w(&client_list_mutex);
+}
+
+void* listener_thread(void *arg) {
+    // will implement listener thread
+}
+
 int main(int argc, char *argv[])
 {
 
