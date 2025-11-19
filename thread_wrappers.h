@@ -1,3 +1,5 @@
+#define __USE_XOPEN2K
+
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,6 +64,47 @@ void pthread_cancel_w(pthread_t thread) {
     int rc = pthread_cancel(thread);
     if (rc != 0) {
         fprintf(stderr, "pthread_cancel failed: %s\n", strerror(rc));
+        exit(EXIT_FAILURE);
+    }
+}
+
+void pthread_rwlock_init_w(pthread_rwlock_t *rwlock, 
+                           const pthread_rwlockattr_t *attr) {
+    int rc = pthread_rwlock_init(rwlock, attr);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_rwlock_init failed: %s\n", strerror(rc));
+        exit(EXIT_FAILURE);
+    }
+}
+
+void pthread_rwlock_rdlock_w(pthread_rwlock_t *rwlock) {
+    int rc = pthread_rwlock_rdlock(rwlock);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_rwlock_rdlock failed: %s\n", strerror(rc));
+        exit(EXIT_FAILURE);
+    }
+}
+
+void pthread_rwlock_wrlock_w(pthread_rwlock_t *rwlock) {
+    int rc = pthread_rwlock_wrlock(rwlock);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_rwlock_wrlock failed: %s\n", strerror(rc));
+        exit(EXIT_FAILURE);
+    }
+}
+
+void pthread_rwlock_unlock_w(pthread_rwlock_t *rwlock) {
+    int rc = pthread_rwlock_unlock(rwlock);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_rwlock_unlock failed: %s\n", strerror(rc));
+        exit(EXIT_FAILURE);
+    }
+}
+
+void pthread_rwlock_destroy_w(pthread_rwlock_t *rwlock) {
+    int rc = pthread_rwlock_destroy(rwlock);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_rwlock_destroy failed: %s\n", strerror(rc));
         exit(EXIT_FAILURE);
     }
 }

@@ -1,89 +1,139 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include "udp.h"
 #include "thread_wrappers.h"
 
 // Linked list structure to store information on clients
 typedef struct ClientNode {
-    struct sockaddr_in addr;
+    struct sockaddr_in addr; // IP and port information
     char name[BUFFER_SIZE];
     struct ClientNode *next; 
 } ClientNode;
 
-ClientNode *client_list = NULL;
-pthread_mutex_t client_list_mutex; 
+typedef struct {
+    int sd;
+    ClientNode *client_list_head;
+    pthread_rwlock_t client_list_lock;
+} ServerState;
 
-void add_client(struct sockaddr_in addr, char *name) {
-    ClientNode *new_client = (ClientNode *)malloc(sizeof(ClientNode));
-    new_client->addr = addr;
-    strcpy(new_client->name, name);
-    new_client->next = NULL;
+typedef struct {
+    ServerState *server_state; // pointer to server state
+    struct sockaddr_in client_addr; // address of client sending the request
+    char request[BUFFER_SIZE]; // request from the client 
+} RequestInfo;
 
-    pthread_mutex_lock_w(&client_list_mutex);
-
-    if (client_list == NULL) {
-        client_list = new_client;
-    }
-    else {
-        ClientNode *current = client_list;
-        while (current->next != NULL) {
-            current = current->next;
-        }
-        current->next = new_client;
-    }
-    pthread_mutex_unlock_w(&client_list_mutex);
+void add_client(ClientNode **head, const char *name, struct sockaddr_in addr) {
+    // allocate memory for new node
+    ClientNode *new_node = (ClientNode *)malloc(sizeof(ClientNode));
+    strcpy(new_node->name, name);
+    new_node->addr = addr;
+    new_node->next = *head;
+    *head = new_node;
 }
 
+void remove_client(ClientNode **head, struct sockaddr_in addr) {
+    ClientNode *current = *head;
+    ClientNode *previous = NULL;
+
+    while (current != NULL) {
+        // Compare IP and port
+        if (memcmp(&current->addr, &addr, sizeof(struct sockaddr_in)) == 0) {
+            if (previous == NULL) {
+                *head = current->next;
+            }
+            else {
+                previous->next = current->next;
+            }
+            free(current);
+            return;
+        }
+        previous = current;
+        current = current->next;
+    }
+}
+
+void handle_connect(RequestInfo *args) {
+    // parse for name (conn$ name)
+    char *name = args->request + 6;
+    
+    // add new client to linked list
+    pthread_rwlock_wrlock_w(&args->server_state->client_list_lock);
+    add_client(&args->server_state->client_list_head, name, args->client_addr);
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+
+    // send response to client
+    char response[BUFFER_SIZE];
+    snprintf(response, BUFFER_SIZE, "Hi, %s you have successfully connected to the chat", name);
+    udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
+}
+
+void handle_disconnect(RequestInfo *args) {
+    pthread_rwlock_wrlock_w(&args->server_state->client_list_lock);
+    remove_client(&args->server_state->client_list_head, args->client_addr);
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+
+    char response[BUFFER_SIZE] = "Disconnected. Bye!";
+    udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
+}
+
+void* request_handler_thread(void *arg) {
+    RequestInfo *args = (RequestInfo *)arg;
+
+    if (strncmp(args->request, "conn$", 5) == 0) {
+        handle_connect(args);
+    }
+    else if (strncmp(args->request, "disconn$", 8) == 0) {
+        handle_disconnect(args);
+    }
+    free(args);
+    return NULL;
+}
+
+
 void* listener_thread(void *arg) {
-    // will implement listener thread
+    ServerState *state = (ServerState *)arg;
+
+    while (1) {
+        RequestInfo *handler_args = malloc(sizeof(RequestInfo));
+        
+        handler_args->server_state = state;
+        int rc = udp_socket_read(state->sd, &handler_args->client_addr, handler_args->request, BUFFER_SIZE);
+        
+        if (rc <= 0) {
+            free(handler_args);
+            continue;
+        }
+        // spawn a thread for the appropriate function for an incoming client depending upon their request type
+        pthread_t handler;
+        pthread_create_w(&handler, NULL, request_handler_thread, handler_args);
+        pthread_detach(handler);
+    }
+    return NULL;
 }
 
 int main(int argc, char *argv[])
 {
-
-    // This function opens a UDP socket,
-    // binding it to all IP interfaces of this machine,
-    // and port number SERVER_PORT
-    // (See details of the function in udp.h)
+    // Open the UDP socket
     int sd = udp_socket_open(SERVER_PORT);
-
     assert(sd > -1);
 
-    // Server main loop
-    while (1) 
-    {
-        // Storage for request and response messages
-        char client_request[BUFFER_SIZE], server_response[BUFFER_SIZE];
-
-        // Demo code (remove later)
-        printf("Server is listening on port %d\n", SERVER_PORT);
-
-        // Variable to store incoming client's IP address and port
-        struct sockaddr_in client_address;
+    // Set up server state
+    ServerState server_state;
+    server_state.sd = sd;
+    server_state.client_list_head = NULL;  // Empty list
+    pthread_rwlock_init_w(&server_state.client_list_lock, NULL); 
     
-        // This function reads incoming client request from
-        // the socket at sd.
-        // (See details of the function in udp.h)
-        int rc = udp_socket_read(sd, &client_address, client_request, BUFFER_SIZE);
-
-        // Successfully received an incoming request
-        if (rc > 0)
-        {
-            // Demo code (remove later)
-            strcpy(server_response, "Hi, the server has received: ");
-            strcat(server_response, client_request);
-            strcat(server_response, "\n");
-
-            // This function writes back to the incoming client,
-            // whose address is now available in client_address, 
-            // through the socket at sd.
-            // (See details of the function in udp.h)
-            rc = udp_socket_write(sd, &client_address, server_response, BUFFER_SIZE);
-
-            // Demo code (remove later)
-            printf("Request served...\n");
-        }
-    }
-
+    // Start the listener thread
+    pthread_t listener;
+    pthread_create_w(&listener, NULL, listener_thread, &server_state);
+    
+    // Wait forever (listener never exits)
+    pthread_join_w(listener, NULL);
+    
+    // Cleanup (never reached)
+    pthread_rwlock_destroy_w(&server_state.client_list_lock);
+    close(sd);
+    
     return 0;
 }
