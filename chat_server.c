@@ -23,8 +23,6 @@ typedef struct {
     char request[BUFFER_SIZE]; // request from the client 
 } RequestInfo;
 
-ClientNode *client_list = NULL;
-
 void add_client(ClientNode **head, const char *name, struct sockaddr_in addr) {
     // allocate memory for new node
     ClientNode *new_node = (ClientNode *)malloc(sizeof(ClientNode));
@@ -34,6 +32,26 @@ void add_client(ClientNode **head, const char *name, struct sockaddr_in addr) {
     *head = new_node;
 }
 
+void remove_client(ClientNode **head, struct sockaddr_in addr) {
+    ClientNode *current = *head;
+    ClientNode *previous = NULL;
+
+    while (current != NULL) {
+        // Compare IP and port
+        if (memcmp(&current->addr, &addr, sizeof(struct sockaddr_in)) == 0) {
+            if (previous == NULL) {
+                *head = current->next;
+            }
+            else {
+                previous->next = current->next;
+            }
+            free(current);
+            return;
+        }
+        previous = current;
+        current = current->next;
+    }
+}
 
 void handle_connect(RequestInfo *args) {
     // parse for name (conn$ name)
@@ -46,7 +64,16 @@ void handle_connect(RequestInfo *args) {
 
     // send response to client
     char response[BUFFER_SIZE];
-    snprintf(response, BUFFER_SIZE, "%s, you have successfully connected to the chat", name);
+    snprintf(response, BUFFER_SIZE, "Hi, %s you have successfully connected to the chat", name);
+    udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
+}
+
+void handle_disconnect(RequestInfo *args) {
+    pthread_rwlock_wrlock_w(&args->server_state->client_list_lock);
+    remove_client(&args->server_state->client_list_head, args->client_addr);
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+
+    char response[BUFFER_SIZE] = "Disconnected. Bye!";
     udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
 }
 
@@ -55,6 +82,9 @@ void* request_handler_thread(void *arg) {
 
     if (strncmp(args->request, "conn$", 5) == 0) {
         handle_connect(args);
+    }
+    else if (strncmp(args->request, "disconn$", 8) == 0) {
+        handle_disconnect(args);
     }
     free(args);
     return NULL;
