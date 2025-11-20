@@ -21,6 +21,7 @@ typedef struct {
     ServerState *server_state; // pointer to server state
     struct sockaddr_in client_addr; // address of client sending the request
     char request[BUFFER_SIZE]; // request from the client 
+    char client_name[BUFFER_SIZE]
 } RequestInfo;
 
 void add_client(ClientNode **head, const char *name, struct sockaddr_in addr) {
@@ -53,6 +54,20 @@ void remove_client(ClientNode **head, struct sockaddr_in addr) {
     }
 }
 
+ClientNode* find_by_address(ClientNode *head, struct sockaddr_in addr) {
+    ClientNode *current = head;
+    
+    while (current != NULL) {
+        // Check if IP and port match
+        if (memcmp(&current->addr, &addr, sizeof(struct sockaddr_in)) == 0) {
+            return current; 
+        }
+        current = current->next;
+    }
+    
+    return NULL;
+}
+
 void handle_connect(RequestInfo *args) {
     // parse for name (conn$ name)
     char *name = args->request + 6;
@@ -77,6 +92,33 @@ void handle_disconnect(RequestInfo *args) {
     udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
 }
 
+void handle_say(RequestInfo *args) {
+    char *message = args->request + 5;
+
+    // Find out who sent the message
+    pthread_rwlock_rdlock_w(&args->server_state->client_list_lock);
+    ClientNode *sender = find_by_address(args->server_state->client_list_head, args->client_addr);
+    
+    if (sender == NULL) {
+        // Client not connected, don't broadcast
+        pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+        return;
+    }
+
+    char broadcast[BUFFER_SIZE];
+    snprintf(broadcast, BUFFER_SIZE, "%s: %s", sender->name, message);
+    
+    // broadcast to everyone on the list
+    ClientNode *current = args->server_state->client_list_head;
+
+    while (current != NULL) {
+        udp_socket_write(args->server_state->sd, &current->addr, broadcast, BUFFER_SIZE);
+        current = current->next;
+    }
+
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+}
+
 void* request_handler_thread(void *arg) {
     RequestInfo *args = (RequestInfo *)arg;
 
@@ -85,6 +127,9 @@ void* request_handler_thread(void *arg) {
     }
     else if (strncmp(args->request, "disconn$", 8) == 0) {
         handle_disconnect(args);
+    }
+    else if (strncmp(args->request, "say$", 4) == 0) {
+        handle_say(args);
     }
     free(args);
     return NULL;
