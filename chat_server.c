@@ -21,7 +21,6 @@ typedef struct {
     ServerState *server_state; // pointer to server state
     struct sockaddr_in client_addr; // address of client sending the request
     char request[BUFFER_SIZE]; // request from the client 
-    char client_name[BUFFER_SIZE]
 } RequestInfo;
 
 void add_client(ClientNode **head, const char *name, struct sockaddr_in addr) {
@@ -119,6 +118,24 @@ void handle_say(RequestInfo *args) {
     pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
 }
 
+void handle_rename(RequestInfo *args) {
+    char *new_name = args->request + 8;
+
+    pthread_rwlock_wrlock_w(&args->server_state->client_list_lock);
+    ClientNode *requesting_client = find_by_address(args->server_state->client_list_head, args->client_addr);
+
+    if (requesting_client == NULL) {
+        pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+        return;
+    }
+    strcpy(requesting_client->name, new_name);
+
+    char response[BUFFER_SIZE];
+    snprintf(response, BUFFER_SIZE, "You are now known as %s", new_name);
+    udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+}
+
 void* request_handler_thread(void *arg) {
     RequestInfo *args = (RequestInfo *)arg;
 
@@ -130,6 +147,9 @@ void* request_handler_thread(void *arg) {
     }
     else if (strncmp(args->request, "say$", 4) == 0) {
         handle_say(args);
+    }
+    else if (strncmp(args->request, "rename$", 7) == 0) {
+        handle_rename(args);
     }
     free(args);
     return NULL;
