@@ -4,6 +4,16 @@
 #include "udp.h"
 #include "thread_wrappers.h"
 
+#define HISTORY_SIZE 15
+
+// Circular buffer for message history
+typedef struct {
+    char messages[HISTORY_SIZE][BUFFER_SIZE];
+    int count;  // Total messages added (may exceed HISTORY_SIZE)
+    int head;   // Index where next message will be written
+} MessageHistory;
+
+
 // Linked list structure to store information on clients
 typedef struct ClientNode {
     struct sockaddr_in addr; // IP and port information
@@ -17,6 +27,8 @@ typedef struct {
     int sd;
     ClientNode *client_list_head;
     pthread_rwlock_t client_list_lock;
+    MessageHistory history;
+    pthread_rwlock_t history_lock;
 } ServerState;
 
 typedef struct {
@@ -117,6 +129,56 @@ bool is_admin(struct sockaddr_in addr) {
 }
 
 
+//new functions for proposed extension 1
+
+// Initialize message history
+void init_message_history(MessageHistory *history) {
+    history->count = 0;
+    history->head = 0;
+    memset(history->messages, 0, sizeof(history->messages));
+}
+
+// Add a message to the circular buffer
+void add_message_to_history(MessageHistory *history, const char *message) {
+    strcpy(history->messages[history->head], message);
+    history->head = (history->head + 1) % HISTORY_SIZE;
+    history->count++;
+}
+
+
+// Send history to a client
+void send_history_to_client(ServerState *server_state, struct sockaddr_in *client_addr) {
+    pthread_rwlock_rdlock_w(&server_state->history_lock);
+    
+    int num_messages = (server_state->history.count < HISTORY_SIZE) ? 
+                       server_state->history.count : HISTORY_SIZE;
+    
+    if (num_messages > 0) {
+        char history_header[BUFFER_SIZE] = "--- Last 15 Messages ---";
+        udp_socket_write(server_state->sd, client_addr, history_header, BUFFER_SIZE);
+        
+        // Calculate starting index in circular buffer
+        int start_index;
+        if (server_state->history.count < HISTORY_SIZE) {
+            start_index = 0;
+        } else {
+            start_index = server_state->history.head;
+        }
+        
+        // Send messages in chronological order
+        for (int i = 0; i < num_messages; i++) {
+            int index = (start_index + i) % HISTORY_SIZE;
+            udp_socket_write(server_state->sd, client_addr, 
+                           server_state->history.messages[index], BUFFER_SIZE);
+        }
+        
+        char history_footer[BUFFER_SIZE] = "--- End of History ---";
+        udp_socket_write(server_state->sd, client_addr, history_footer, BUFFER_SIZE);
+    }
+    
+    pthread_rwlock_unlock_w(&server_state->history_lock);
+}
+
 void handle_connect(RequestInfo *args) {
     // parse for name (conn$ name)
     char *name = args->request + 6;
@@ -130,6 +192,7 @@ void handle_connect(RequestInfo *args) {
     char response[BUFFER_SIZE];
     snprintf(response, BUFFER_SIZE, "Hi, %s you have successfully connected to the chat", name);
     udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
+    send_history_to_client(args->server_state, &args->client_addr);
 }
 
 void handle_disconnect(RequestInfo *args) {
@@ -155,6 +218,10 @@ void handle_say(RequestInfo *args) {
     
     char broadcast[BUFFER_SIZE];
     snprintf(broadcast, BUFFER_SIZE, "%s: %s", args->requesting_client->name, message);
+
+    pthread_rwlock_wrlock_w(&args->server_state->history_lock);
+    add_message_to_history(&args->server_state->history, broadcast);
+    pthread_rwlock_unlock_w(&args->server_state->history_lock);
     
 
     // broadcast to everyone on the list
@@ -499,6 +566,9 @@ int main(int argc, char *argv[])
     server_state.sd = sd;
     server_state.client_list_head = NULL;  // Empty list
     pthread_rwlock_init_w(&server_state.client_list_lock, NULL); 
+
+    init_message_history(&server_state.history);
+    pthread_rwlock_init_w(&server_state.history_lock, NULL);
     
     // Start the listener thread
     pthread_t listener;
@@ -509,6 +579,7 @@ int main(int argc, char *argv[])
     
     // Cleanup (never reached)
     pthread_rwlock_destroy_w(&server_state.client_list_lock);
+    pthread_rwlock_destroy_w(&server_state.history_lock);
     close(sd);
     
     return 0;
