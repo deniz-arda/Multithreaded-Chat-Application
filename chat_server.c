@@ -32,7 +32,12 @@ void add_client(ClientNode **head, const char *name, struct sockaddr_in addr) {
     strcpy(new_node->name, name);
     new_node->addr = addr;
     new_node->next = *head;
-    *head = new_node;
+
+    //initialise mute arrays
+    new_node->muted_addresses = NULL;
+    new_node->muted_count = 0;
+
+    *head = new_node; 
 }
 
 void remove_client(ClientNode **head, struct sockaddr_in addr) {
@@ -48,6 +53,12 @@ void remove_client(ClientNode **head, struct sockaddr_in addr) {
             else {
                 previous->next = current->next;
             }
+
+            //free muted addresses array if it exists
+            if (current->muted_addresses != NULL){
+                free(current->muted_addresses);
+            }
+
             free(current);
             return;
         }
@@ -83,12 +94,41 @@ ClientNode* find_by_name(ClientNode *head, const char *name) {
     return NULL;
 }
 
+
+bool is_muted(ClientNode *client, struct sockaddr_in addr) {
+    if (client == NULL || client->muted_addresses == NULL){
+        return false;
+    }
+
+    for (int i = 0; i < client->muted_count; i++) {
+        if (memcmp(&client->muted_addresses[i], &addr, sizeof(struct sockaddr_in)) == 0){
+            return true;
+        }
+    }
+
+    return false;
+
+}
+
+bool is_admin(struct sockaddr_in addr) {
+    int port = ntohs(addr.sin_port);
+    return port == 6666;
+}
+
+
 void handle_connect(RequestInfo *args) {
     // parse for name (conn$ name)
     char *name = args->request + 6;
     
     // add new client to linked list
     pthread_rwlock_wrlock_w(&args->server_state->client_list_lock);
+
+    //Check if this address already exists and remove it (handle reconnection)
+    ClientNode *existing = find_by_address(args->server_state->client_list_head, args->client_addr);
+    if (existing != NULL){
+        remove_client(&args->server_state->client_list_head, args->client_addr);
+    }
+
     add_client(&args->server_state->client_list_head, name, args->client_addr);
     pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
 
@@ -122,11 +162,14 @@ void handle_say(RequestInfo *args) {
     char broadcast[BUFFER_SIZE];
     snprintf(broadcast, BUFFER_SIZE, "%s: %s", args->requesting_client->name, message);
     
+
     // broadcast to everyone on the list
     ClientNode *current = args->server_state->client_list_head;
 
     while (current != NULL) {
-        udp_socket_write(args->server_state->sd, &current->addr, broadcast, BUFFER_SIZE);
+        if(!is_muted(current, args->requesting_client->addr)){
+            udp_socket_write(args->server_state->sd, &current->addr, broadcast, BUFFER_SIZE);
+        }
         current = current->next;
     }
 
@@ -157,6 +200,7 @@ void handle_sayto(RequestInfo *args) {
 
     int name_length = pos - unparsed_message; // get the name of the person receiving the message 
     strncpy(recipient_name, unparsed_message, name_length);
+    recipient_name[name_length] = '\0';
 
     char *message = pos + 1; // get the message
 
@@ -173,6 +217,7 @@ void handle_sayto(RequestInfo *args) {
         char error_msg[BUFFER_SIZE];
         snprintf(error_msg, BUFFER_SIZE, "Error: could not find user %s", recipient_name);
         udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
     }
     char private_msg[BUFFER_SIZE];
     snprintf(private_msg, BUFFER_SIZE, "%s: %s", args->requesting_client->name, message);
@@ -182,11 +227,211 @@ void handle_sayto(RequestInfo *args) {
 }
 
 void handle_mute(RequestInfo *args) {
-    // implement
+    char *mute_target_name = args->request + 6; // skip "mute$ "
+    
+    if (args->requesting_client == NULL) {
+        char error_msg[BUFFER_SIZE] = "Error: Client is not connected to the server";
+        udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
+    }
+    
+    pthread_rwlock_rdlock_w(&args->server_state->client_list_lock);
+    
+    // Find the client to mute
+    ClientNode *target = find_by_name(args->server_state->client_list_head, mute_target_name);
+    
+    if (target == NULL) {
+        pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+        
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error: Could not find user %s", mute_target_name);
+        udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
+    }
+    
+    
+    if (is_muted(args->requesting_client, target->addr)) {
+        pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+        
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "User %s is already muted", mute_target_name);
+        udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
+    }
+    
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+    
+    
+    pthread_rwlock_wrlock_w(&args->server_state->client_list_lock);
+    
+    
+    args->requesting_client->muted_addresses = (struct sockaddr_in *)realloc(
+        args->requesting_client->muted_addresses,
+        (args->requesting_client->muted_count + 1) * sizeof(struct sockaddr_in)
+    );
+    
+    // Add the target's address to muted list
+    args->requesting_client->muted_addresses[args->requesting_client->muted_count] = target->addr;
+    args->requesting_client->muted_count++;
+    
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+    
+    
+    char response[BUFFER_SIZE];
+    snprintf(response, BUFFER_SIZE, "You have muted %s", mute_target_name);
+    udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
 }
 
 void handle_unmute(RequestInfo *args) {
-    // implement
+    char *unmute_target_name = args->request + 8; // skip "unmute$ "
+    
+    if (args->requesting_client == NULL) {
+        char error_msg[BUFFER_SIZE] = "Error: Client is not connected to the server";
+        udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
+    }
+    
+    pthread_rwlock_rdlock_w(&args->server_state->client_list_lock);
+    
+    // Find the client to unmute
+    ClientNode *target = find_by_name(args->server_state->client_list_head, unmute_target_name);
+    
+    if (target == NULL) {
+        pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+        
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error: Could not find user %s", unmute_target_name);
+        udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
+    }
+    
+    // Check if actually muted
+    if (!is_muted(args->requesting_client, target->addr)) {
+        pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+        
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "User %s is not muted", unmute_target_name);
+        udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
+    }
+    
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+    
+    pthread_rwlock_wrlock_w(&args->server_state->client_list_lock);
+    
+
+    int found_index = -1;
+    for (int i = 0; i < args->requesting_client->muted_count; i++) {
+        if (memcmp(&args->requesting_client->muted_addresses[i], &target->addr, sizeof(struct sockaddr_in)) == 0) {
+            found_index = i;
+            break;
+        }
+    }
+    
+    if (found_index != -1) {
+        // Shift remaining elements down
+        for (int i = found_index; i < args->requesting_client->muted_count - 1; i++) {
+            args->requesting_client->muted_addresses[i] = args->requesting_client->muted_addresses[i + 1];
+        }
+        
+        args->requesting_client->muted_count--;
+        
+        // Reallocate to smaller size (or free if count is 0)
+        if (args->requesting_client->muted_count == 0) {
+            free(args->requesting_client->muted_addresses);
+            args->requesting_client->muted_addresses = NULL;
+        } else {
+            args->requesting_client->muted_addresses = (struct sockaddr_in *)realloc(
+                args->requesting_client->muted_addresses,
+                args->requesting_client->muted_count * sizeof(struct sockaddr_in)
+            );
+        }
+    }
+    
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+    
+    // Send confirmation 
+    char response[BUFFER_SIZE];
+    snprintf(response, BUFFER_SIZE, "You have unmuted %s", unmute_target_name);
+    udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
+}
+
+void handle_kick(RequestInfo *args) {
+    char *kick_target_name = args->request + 6; // skip "kick$ "
+    
+    // Check if requester is connected
+    if (args->requesting_client == NULL) {
+        char error_msg[BUFFER_SIZE] = "Error: Client is not connected to the server";
+        udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
+    }
+    
+    // Check if requester is admin (port 6666)
+    if (!is_admin(args->client_addr)) {
+        char error_msg[BUFFER_SIZE] = "Error: Only admin can kick users";
+        udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
+    }
+    
+    pthread_rwlock_rdlock_w(&args->server_state->client_list_lock);
+    
+    // Find the client to kick
+    ClientNode *target = find_by_name(args->server_state->client_list_head, kick_target_name);
+    
+    if (target == NULL) {
+        pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+        
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error: Could not find user %s", kick_target_name);
+        udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
+    }
+    
+    // Don't allow admin to kick themselves
+    if (memcmp(&target->addr, &args->client_addr, sizeof(struct sockaddr_in)) == 0) {
+        pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+        
+        char error_msg[BUFFER_SIZE] = "Error: Cannot kick yourself";
+        udp_socket_write(args->server_state->sd, &args->client_addr, error_msg, BUFFER_SIZE);
+        return;
+    }
+    
+    // Store target info before removing (need it for notifications)
+    struct sockaddr_in target_addr = target->addr;
+    char target_name[BUFFER_SIZE];
+    strcpy(target_name, target->name);
+    
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+    
+    // Send notification to the kicked client
+    char kick_msg[BUFFER_SIZE] = "You have been removed from the chat";
+    udp_socket_write(args->server_state->sd, &target_addr, kick_msg, BUFFER_SIZE);
+    
+    
+    pthread_rwlock_wrlock_w(&args->server_state->client_list_lock);
+    
+    
+    remove_client(&args->server_state->client_list_head, target_addr);
+    
+    // Broadcast removal notification to all remaining clients
+    char broadcast[BUFFER_SIZE];
+    snprintf(broadcast, BUFFER_SIZE, "%s has been removed from the chat", target_name);
+    
+    ClientNode *current = args->server_state->client_list_head;
+    while (current != NULL) {
+        if(memcmp(&current->addr, &args->client_addr, sizeof(struct sockaddr_in)) != 0){
+
+            udp_socket_write(args->server_state->sd, &current->addr, broadcast, BUFFER_SIZE);
+        } 
+        current = current->next;
+    }
+    
+    pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
+    
+    // Confirm to admin
+    char response[BUFFER_SIZE];
+    snprintf(response, BUFFER_SIZE, "User %s has been kicked from the chat", target_name);
+    udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
 }
 
 void* request_handler_thread(void *arg) {
@@ -208,15 +453,17 @@ void* request_handler_thread(void *arg) {
         handle_sayto(args);
     }
     else if (strncmp(args->request, "mute$", 5) == 0) {
-        // handle mute
+        handle_mute(args);
     }
     else if (strncmp(args->request, "unmute$", 7) == 0) {
-        // handle unmute
+        handle_unmute(args);
+    }
+    else if (strncmp(args->request, "kick$", 5) == 0) {
+        handle_kick(args);
     }
     free(args);
     return NULL;
 }
-
 
 void* listener_thread(void *arg) {
     ServerState *state = (ServerState *)arg;
