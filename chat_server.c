@@ -44,7 +44,6 @@ void add_client(ClientNode **head, const char *name, struct sockaddr_in addr) {
     strcpy(new_node->name, name);
     new_node->addr = addr;
     new_node->next = *head;
-    *head = new_node;
 
     //initialise mute arrays
     new_node -> muted_addresses = NULL;
@@ -185,6 +184,13 @@ void handle_connect(RequestInfo *args) {
     
     // add new client to linked list
     pthread_rwlock_wrlock_w(&args->server_state->client_list_lock);
+
+    // Check if this address already exists and remove it (handle reconnection case)
+    ClientNode *existing = find_by_address(args->server_state->client_list_head, args->client_addr);
+    if (existing != NULL) {
+        remove_client(&args->server_state->client_list_head, args->client_addr);
+    }
+
     add_client(&args->server_state->client_list_head, name, args->client_addr);
     pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
 
