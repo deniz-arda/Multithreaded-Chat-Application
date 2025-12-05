@@ -7,6 +7,7 @@
 typedef struct {
     int sd;
     int exit;
+    int port;  //added this
     struct sockaddr_in server_addr;
 } ClientState;
 
@@ -35,22 +36,64 @@ void* listener_thread(void *arg) {
     ClientState *state = (ClientState *)arg; 
     char response[BUFFER_SIZE];
     struct sockaddr_in responder_addr;
-    
+
+    //open file for appending chat messages
+
+    char filename[50];
+    snprintf(filename, sizeof(filename), "iChat_%d.txt", state->port);
+    FILE *chat_file = fopen(filename, "a"); 
+
+    if (chat_file == NULL) {
+        perror("Failed to open iChat.txt");
+        return NULL;
+    }
+
     while (!state->exit) {
         int rc = udp_socket_read(state->sd, &responder_addr, response, BUFFER_SIZE);
 
         if (rc > 0) {
-            printf("%s\n", response);
+            if (strncmp(response, "ping$", 5) == 0){
+                // Respond to ping
+                char ret_ping[BUFFER_SIZE] = "ret-ping$";
+                udp_socket_write(state->sd, &state->server_addr, ret_ping, BUFFER_SIZE);
+            }
+
+            else {
+                //normal message handling
+                //write to file AND print to console
+                fprintf(chat_file, "%s\n", response);
+                fflush(chat_file);  // Ensure it's written immediately
+                //printf("%s\n", response);  // Still print to console too
+
+            }
         }
     }
+
+    fclose(chat_file);
     return NULL;
 }
 
 // client code
 int main(int argc, char *argv[])
 {
+
+    //Check if port was passed as argument
+    int client_port = CLIENT_PORT; //default
+    if (argc > 1){
+        client_port = atoi(argv[1]);
+    }
+
+    // Clear the chat file at start
+    char filename[50];
+    snprintf(filename, sizeof(filename), "iChat_%d.txt", client_port);
+    FILE *chat_file = fopen(filename, "w");
+
+    if (chat_file != NULL) {
+        fclose(chat_file);
+    }
+
     // Open UDP socket on CLIENT_PORT
-    int sd = udp_socket_open(CLIENT_PORT);
+    int sd = udp_socket_open(client_port);
 
     // Set up server address
     struct sockaddr_in server_addr;
@@ -60,6 +103,7 @@ int main(int argc, char *argv[])
     ClientState state;
     state.sd = sd;
     state.exit = 0;
+    state.port = client_port;  //added this
     state.server_addr = server_addr;
 
     // Create sender and listener threads
