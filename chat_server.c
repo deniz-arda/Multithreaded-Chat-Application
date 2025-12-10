@@ -7,15 +7,8 @@
 
 #define HISTORY_SIZE 15
 
-#define INACTIVITY_THRESHOLD 60  // 5 minutes in seconds
-#define PING_TIMEOUT 5           // 10 seconds to respond to ping
-
-// Activity tracking structure
-typedef struct ActivityNode {
-    struct sockaddr_in addr;
-    time_t last_active;
-    struct ActivityNode *next;
-} ActivityNode;
+#define INACTIVITY_THRESHOLD 15  // 5 minutes in seconds
+#define PING_TIMEOUT 5         // 10 seconds to respond to ping
 
 // Circular buffer for message history
 typedef struct {
@@ -23,6 +16,14 @@ typedef struct {
     int count;  // Total messages added (may exceed HISTORY_SIZE)
     int head;   // Index where next message will be written
 } MessageHistory;
+
+
+// Activity tracking structure
+typedef struct ActivityNode {
+    struct sockaddr_in addr;
+    time_t last_active;
+    struct ActivityNode *next;
+} ActivityNode;
 
 
 // Linked list structure to store information on clients
@@ -41,7 +42,7 @@ typedef struct {
     MessageHistory history;
     pthread_rwlock_t history_lock;
     ActivityNode *activity_list_head;
-    pthread_rwlock_t activity_lock;
+    pthread_rwlock_t activity_lock; 
 } ServerState;
 
 typedef struct {
@@ -57,7 +58,6 @@ void add_client(ClientNode **head, const char *name, struct sockaddr_in addr) {
     strcpy(new_node->name, name);
     new_node->addr = addr;
     new_node->next = *head;
-    *head = new_node;
 
     //initialise mute arrays
     new_node -> muted_addresses = NULL;
@@ -192,9 +192,6 @@ void send_history_to_client(ServerState *server_state, struct sockaddr_in *clien
     pthread_rwlock_unlock_w(&server_state->history_lock);
 }
 
-
-//helper functions for proposed extension 2
-
 // Add or update activity timestamp for a client
 void update_activity(ActivityNode **head, struct sockaddr_in addr) {
     ActivityNode *current = *head;
@@ -259,6 +256,13 @@ void handle_connect(RequestInfo *args) {
     
     // add new client to linked list
     pthread_rwlock_wrlock_w(&args->server_state->client_list_lock);
+
+    // Check if this address already exists and remove it (handle reconnection case)
+    ClientNode *existing = find_by_address(args->server_state->client_list_head, args->client_addr);
+    if (existing != NULL) {
+        remove_client(&args->server_state->client_list_head, args->client_addr);
+    }
+
     add_client(&args->server_state->client_list_head, name, args->client_addr);
     pthread_rwlock_unlock_w(&args->server_state->client_list_lock);
 
@@ -581,9 +585,8 @@ void handle_kick(RequestInfo *args) {
     udp_socket_write(args->server_state->sd, &args->client_addr, response, BUFFER_SIZE);
 }
 
-
-//new helper function for proposed extension 2
 void handle_ret_ping(RequestInfo *args) {
+    printf("[SERVER] Received ret-ping response from client\n");
     // Update activity timestamp when client responds to ping
     pthread_rwlock_wrlock_w(&args->server_state->activity_lock);
     update_activity(&args->server_state->activity_list_head, args->client_addr);
@@ -625,6 +628,7 @@ void* request_handler_thread(void *arg) {
         update_activity(&args->server_state->activity_list_head, args->client_addr);
         pthread_rwlock_unlock_w(&args->server_state->activity_lock);
     }
+
     free(args);
     return NULL;
 }
@@ -658,12 +662,12 @@ void* listener_thread(void *arg) {
     return NULL;
 }
 
-//new thread function for proposed extension 2
 void* activity_monitor_thread(void *arg) {
     ServerState *state = (ServerState *)arg;
     
     while (1) {
-        sleep(10);  // Check every 10 seconds
+        sleep(5);  // Check every 30 seconds
+        printf("[MONITOR] Checking for inactive clients...\n");
         
         pthread_rwlock_rdlock_w(&state->activity_lock);
         ActivityNode *least_active = find_least_active(state->activity_list_head);
@@ -671,11 +675,15 @@ void* activity_monitor_thread(void *arg) {
         if (least_active != NULL) {
             time_t current_time = time(NULL);
             double inactive_time = difftime(current_time, least_active->last_active);
+
+            printf("[MONITOR] Least active client has been idle for %.0f seconds (threshold: %d)\n", 
+                   inactive_time, INACTIVITY_THRESHOLD);
             
             if (inactive_time > INACTIVITY_THRESHOLD) {
                 struct sockaddr_in inactive_addr = least_active->addr;
-                time_t ping_sent_time = current_time;  // Record when we sent the ping
                 pthread_rwlock_unlock_w(&state->activity_lock);
+
+                printf("[MONITOR] Sending ping to inactive client...\n");
                 
                 // Send ping
                 char ping_msg[BUFFER_SIZE] = "ping$";
@@ -684,15 +692,14 @@ void* activity_monitor_thread(void *arg) {
                 // Wait for response
                 sleep(PING_TIMEOUT);
                 
-                // Check if client responded (activity updated AFTER we sent the ping)
+                // Check if client responded (activity updated)
                 pthread_rwlock_rdlock_w(&state->activity_lock);
                 ActivityNode *check = state->activity_list_head;
                 bool responded = false;
                 
                 while (check != NULL) {
                     if (memcmp(&check->addr, &inactive_addr, sizeof(struct sockaddr_in)) == 0) {
-                        // Client responded if their last_active was updated AFTER we sent the ping
-                        if (check->last_active > ping_sent_time) {
+                        if (check->last_active > current_time){
                             responded = true;
                         }
                         break;
@@ -703,6 +710,7 @@ void* activity_monitor_thread(void *arg) {
                 
                 // If no response, remove client
                 if (!responded) {
+                    printf("[MONITOR] No response to ping, removing client...\n");
                     pthread_rwlock_rdlock_w(&state->client_list_lock);
                     ClientNode *inactive_client = find_by_address(state->client_list_head, inactive_addr);
                     
@@ -734,6 +742,9 @@ void* activity_monitor_thread(void *arg) {
                     } else {
                         pthread_rwlock_unlock_w(&state->client_list_lock);
                     }
+                } else {
+                    // ADD THIS ELSE BLOCK HERE (moved from inside the if (!responded) block)
+                    printf("[MONITOR] Client responded to ping, keeping connected\n");
                 }
                 continue;
             }
@@ -743,7 +754,6 @@ void* activity_monitor_thread(void *arg) {
     
     return NULL;
 }
-
 
 int main(int argc, char *argv[])
 {
