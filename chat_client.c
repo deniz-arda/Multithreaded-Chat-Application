@@ -52,20 +52,25 @@ void* listener_thread(void *arg) {
         int rc = udp_socket_read(state->sd, &responder_addr, response, BUFFER_SIZE);
 
         if (rc > 0) {
-            if (strncmp(response, "ping$", 5) == 0){
+
+            if(strncmp(response, "ping$", 5) == 0){
+
+                printf("\n[Received ping from server, responding...]\n");
+
+                
                 // Respond to ping
                 char ret_ping[BUFFER_SIZE] = "ret-ping$";
                 udp_socket_write(state->sd, &state->server_addr, ret_ping, BUFFER_SIZE);
             }
 
             else {
-                //normal message handling
-                //write to file AND print to console
+                // Normal message handling
                 fprintf(chat_file, "%s\n", response);
-                fflush(chat_file);  // Ensure it's written immediately
+                fflush(chat_file);
                 //printf("%s\n", response);  // Still print to console too
 
             }
+            
         }
     }
 
