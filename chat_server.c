@@ -596,6 +596,13 @@ void handle_ret_ping(RequestInfo *args) {
 void* request_handler_thread(void *arg) {
     RequestInfo *args = (RequestInfo *)arg;
 
+    // Update activity timestamp for ANY client interaction (except ret-ping, which handles it separately)
+    if (strncmp(args->request, "ret-ping$", 9) != 0) {
+        pthread_rwlock_wrlock_w(&args->server_state->activity_lock);
+        update_activity(&args->server_state->activity_list_head, args->client_addr);
+        pthread_rwlock_unlock_w(&args->server_state->activity_lock);
+    }
+
     if (strncmp(args->request, "conn$", 5) == 0) {
         handle_connect(args);
     }
@@ -622,11 +629,6 @@ void* request_handler_thread(void *arg) {
     }
     else if (strncmp(args->request, "ret-ping$", 9) == 0) {
         handle_ret_ping(args);
-    }
-    else {
-        pthread_rwlock_wrlock_w(&args->server_state->activity_lock);
-        update_activity(&args->server_state->activity_list_head, args->client_addr);
-        pthread_rwlock_unlock_w(&args->server_state->activity_lock);
     }
 
     free(args);
@@ -666,7 +668,7 @@ void* activity_monitor_thread(void *arg) {
     ServerState *state = (ServerState *)arg;
     
     while (1) {
-        sleep(5);  // Check every 30 seconds
+        sleep(5);  // Check every 5 seconds
         printf("[MONITOR] Checking for inactive clients...\n");
         
         pthread_rwlock_rdlock_w(&state->activity_lock);
@@ -681,6 +683,7 @@ void* activity_monitor_thread(void *arg) {
             
             if (inactive_time > INACTIVITY_THRESHOLD) {
                 struct sockaddr_in inactive_addr = least_active->addr;
+                time_t old_last_active = least_active->last_active;  // Store the old timestamp
                 pthread_rwlock_unlock_w(&state->activity_lock);
 
                 printf("[MONITOR] Sending ping to inactive client...\n");
@@ -689,8 +692,11 @@ void* activity_monitor_thread(void *arg) {
                 char ping_msg[BUFFER_SIZE] = "ping$";
                 udp_socket_write(state->sd, &inactive_addr, ping_msg, BUFFER_SIZE);
                 
-                // Wait for response
+                // Wait for response - give more time for processing
                 sleep(PING_TIMEOUT);
+                
+                // Add a small buffer to ensure the handler thread has processed the response
+                usleep(100000);  // 100ms additional buffer
                 
                 // Check if client responded (activity updated)
                 pthread_rwlock_rdlock_w(&state->activity_lock);
@@ -699,8 +705,14 @@ void* activity_monitor_thread(void *arg) {
                 
                 while (check != NULL) {
                     if (memcmp(&check->addr, &inactive_addr, sizeof(struct sockaddr_in)) == 0) {
-                        if (check->last_active > current_time){
+                        // Check if last_active was updated (is newer than before ping)
+                        if (check->last_active > old_last_active) {
                             responded = true;
+                            printf("[MONITOR] Client responded - old: %ld, new: %ld\n", 
+                                   old_last_active, check->last_active);
+                        } else {
+                            printf("[MONITOR] No update - old: %ld, new: %ld\n", 
+                                   old_last_active, check->last_active);
                         }
                         break;
                     }
@@ -743,7 +755,6 @@ void* activity_monitor_thread(void *arg) {
                         pthread_rwlock_unlock_w(&state->client_list_lock);
                     }
                 } else {
-                    // ADD THIS ELSE BLOCK HERE (moved from inside the if (!responded) block)
                     printf("[MONITOR] Client responded to ping, keeping connected\n");
                 }
                 continue;
