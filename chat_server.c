@@ -7,8 +7,8 @@
 
 #define HISTORY_SIZE 15
 
-#define INACTIVITY_THRESHOLD 15  // 5 minutes in seconds
-#define PING_TIMEOUT 5         // 10 seconds to respond to ping
+#define INACTIVITY_THRESHOLD 300  // 5 minutes in seconds
+#define PING_TIMEOUT 10         // 10 seconds to respond to ping
 
 // Circular buffer for message history
 typedef struct {
@@ -193,24 +193,59 @@ void send_history_to_client(ServerState *server_state, struct sockaddr_in *clien
 }
 
 // Add or update activity timestamp for a client
+// Replace your current update_activity function with this sorted version
 void update_activity(ActivityNode **head, struct sockaddr_in addr) {
     ActivityNode *current = *head;
+    ActivityNode *prev = NULL;
     
-    // Search for existing entry
+    // Search for existing entry and remove it
     while (current != NULL) {
         if (memcmp(&current->addr, &addr, sizeof(struct sockaddr_in)) == 0) {
-            current->last_active = time(NULL);
-            return;
+            // Found existing entry, remove it
+            if (prev == NULL) {
+                *head = current->next;
+            } else {
+                prev->next = current->next;
+            }
+            free(current);
+            break;
         }
+        prev = current;
         current = current->next;
     }
     
-    // Not found, create new entry
+    // Create new node with current timestamp
     ActivityNode *new_node = (ActivityNode *)malloc(sizeof(ActivityNode));
     new_node->addr = addr;
     new_node->last_active = time(NULL);
-    new_node->next = *head;
-    *head = new_node;
+    new_node->next = NULL;
+    
+    // Insert in sorted position (ascending order by last_active)
+    // The head will always be the least recently active client
+    prev = NULL;
+    current = *head;
+    
+    while (current != NULL && current->last_active < new_node->last_active) {
+        prev = current;
+        current = current->next;
+    }
+    
+    // Insert the new node
+    if (prev == NULL) {
+        // Insert at head
+        new_node->next = *head;
+        *head = new_node;
+    } else {
+        // Insert in middle or at end
+        new_node->next = current;
+        prev->next = new_node;
+    }
+}
+
+// Replace your current find_least_active function with this O(1) version
+ActivityNode* find_least_active(ActivityNode *head) {
+    // Since the list is sorted, the head is always the least active!
+    return head;
 }
 
 // Remove activity entry for a client
@@ -231,23 +266,6 @@ void remove_activity(ActivityNode **head, struct sockaddr_in addr) {
         previous = current;
         current = current->next;
     }
-}
-
-// Find the least recently active client
-ActivityNode* find_least_active(ActivityNode *head) {
-    if (head == NULL) return NULL;
-    
-    ActivityNode *least_active = head;
-    ActivityNode *current = head->next;
-    
-    while (current != NULL) {
-        if (current->last_active < least_active->last_active) {
-            least_active = current;
-        }
-        current = current->next;
-    }
-    
-    return least_active;
 }
 
 void handle_connect(RequestInfo *args) {
@@ -668,7 +686,7 @@ void* activity_monitor_thread(void *arg) {
     ServerState *state = (ServerState *)arg;
     
     while (1) {
-        sleep(5);  // Check every 5 seconds
+        sleep(20);  // Check every 20 seconds
         printf("[MONITOR] Checking for inactive clients...\n");
         
         pthread_rwlock_rdlock_w(&state->activity_lock);
